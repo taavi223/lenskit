@@ -80,6 +80,8 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
 
         private int levelCount;
         private double t1;
+        private double global;
+        private double weight;
         private AVector beta;
         private ImmutableVector qtzValues;
 
@@ -97,6 +99,8 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
             levelCount = qtzValues.length();
             t1 = (qtzValues.get(0) + qtzValues.get(1))/2;
             beta = Vector.createLength(levelCount - 2);
+            weight = 1.0;
+            global = 0.0;
 
             double tr = t1;
             for (int i = 1; i <= beta.length(); i++) {
@@ -105,6 +109,21 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
                 tr = trnext;
             }
         }
+
+        /**
+         * Get the global constant to add to the external scores
+         *
+         * @return the global constant to add to the external scores.
+         */
+        public double getGlobal() { return global; }
+
+        /**
+         * Get the weight for the external scores
+         *
+         * @return the weight for the external scores.
+         */
+        public double getWeight() { return weight; }
+
 
         /**
          * Get the first threshold t1
@@ -143,7 +162,7 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
             double tr = t1;
             if(thresholdIndex < 0) {
                 return Double.NEGATIVE_INFINITY;
-            } else if(thresholdIndex == 0){
+            } else if(thresholdIndex == 0){ // TODO: ??? Why is this not the same as python implementation?
                 return tr;
             } else if(thresholdIndex > beta.length()) {
                 return Double.POSITIVE_INFINITY;
@@ -207,16 +226,19 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
 
             Vector dbeta = Vector.createLength(beta.length());
             double dt1;
+            double dweight;
+            double dglobal;
             // n is the number of iteration;
             for (int j = 0; j < iterationCount; j++ ) {
                 for (VectorEntry rating: ratings) {
                     long iid = rating.getKey();
-                    double score = scores.get(iid);
+                    double externalScore = scores.get(iid);
+                    double score = global + weight * externalScore;
                     int r = quantizer.index(rating.getValue());
 
-                    double probEqualR = getProbEQ(score,r);
-                    double probLessR = getProbLE(score,r);
+                    double probLessR = getProbLE(score, r);
                     double probLessR_1 = getProbLE(score, r-1);
+                    double probEqualR = probLessR - probLessR_1;
 
                     dt1 = learningRate / probEqualR * ( probLessR * (1 - probLessR) * derivateOfBeta(r, 0, t1)
                             - probLessR_1 * (1 - probLessR_1) * derivateOfBeta(r-1, 0, t1) - regTerm*t1);
@@ -228,8 +250,15 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
                                 derivateOfBeta(r-1, k+1, beta.get(k)) - regTerm*beta.get(k));
                         dbeta.set(k, dbetaK);
                     }
+
+                    dglobal = learningRate / probEqualR * ( probLessR * (1 - probLessR) * (-1) - probLessR_1 * (1 - probLessR_1) * (-1) - regTerm*global);
+                    dweight = learningRate / probEqualR * ( probLessR * (1 - probLessR) * (-1*externalScore) - probLessR_1 * (1 - probLessR_1) * (-1*externalScore) - regTerm*weight);
+
                     t1 = t1 + dt1;
                     beta.add(dbeta);
+                    global = global + dglobal;
+                    weight = weight + dweight;
+
                 }
             }
         }
@@ -324,6 +353,7 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
         LongSet keySet = LongUtils.setUnion(ratings.keySet(), predictions.keyDomain());
         MutableSparseVector scores = MutableSparseVector.create(keySet);
         itemScorer.score(uid, scores);
+
         params.train(ratings, scores);
         logger.debug("trained parameters for {}: {}", uid, params);
 
@@ -335,7 +365,7 @@ public class OrdRecRatingPredictor extends AbstractRatingPredictor {
 
         for (VectorEntry e: predictions.view(VectorEntry.State.EITHER)) {
             long iid = e.getKey();
-            double score = scores.get(iid);
+            double score = params.getGlobal() + params.getWeight() * scores.get(iid);
             params.getProbDistribution(score, probabilities);
 
             int mlIdx = probabilities.maxElementIndex();
